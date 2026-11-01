@@ -21,8 +21,152 @@ const sqlite = new Database("data.db");
 sqlite.pragma("journal_mode = WAL");
 export const db = drizzle(sqlite);
 
+// ─── Schema bootstrap ───
+// The prototype has no migration runner; tables were originally created with
+// drizzle-kit push. On a fresh database (e.g. an ephemeral host filesystem) no
+// tables exist at boot, so create them here first — IF NOT EXISTS keeps this a
+// no-op for existing data.db files. DDL mirrors `npm run db:push` output for
+// shared/schema.ts (as dumped from a known-good data.db); the column additions
+// in runMigrations() below are applied afterwards as before.
+const SCHEMA_DDL = `
+CREATE TABLE IF NOT EXISTS \`bids\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`trip_request_id\` integer NOT NULL,
+	\`property_id\` integer NOT NULL,
+	\`owner_id\` integer NOT NULL,
+	\`price_per_night\` real NOT NULL,
+	\`total_price\` real NOT NULL,
+	\`message\` text,
+	\`status\` text DEFAULT 'pending' NOT NULL,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`bookings\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`bid_id\` integer NOT NULL,
+	\`trip_request_id\` integer NOT NULL,
+	\`property_id\` integer NOT NULL,
+	\`guest_id\` integer NOT NULL,
+	\`owner_id\` integer NOT NULL,
+	\`check_in\` text NOT NULL,
+	\`check_out\` text NOT NULL,
+	\`total_price\` real NOT NULL,
+	\`damage_deposit\` real NOT NULL,
+	\`status\` text DEFAULT 'upcoming' NOT NULL,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`coupons\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`guest_id\` integer NOT NULL,
+	\`rating_id\` integer,
+	\`code\` text NOT NULL,
+	\`discount_percent\` integer DEFAULT 10 NOT NULL,
+	\`status\` text DEFAULT 'active' NOT NULL,
+	\`expires_at\` text NOT NULL,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS \`coupons_code_unique\` ON \`coupons\` (\`code\`);
+CREATE TABLE IF NOT EXISTS \`guest_ratings\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`booking_id\` integer NOT NULL,
+	\`owner_id\` integer NOT NULL,
+	\`guest_id\` integer NOT NULL,
+	\`overall_score\` integer NOT NULL,
+	\`cleanliness_score\` integer NOT NULL,
+	\`communication_score\` integer NOT NULL,
+	\`respect_score\` integer NOT NULL,
+	\`review\` text,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`ledger_entries\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`owner_id\` integer NOT NULL,
+	\`booking_id\` integer,
+	\`type\` text NOT NULL,
+	\`category\` text NOT NULL,
+	\`amount\` real NOT NULL,
+	\`description\` text NOT NULL,
+	\`date\` text NOT NULL,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`notifications\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`user_id\` integer NOT NULL,
+	\`type\` text NOT NULL,
+	\`message\` text NOT NULL,
+	\`read\` integer DEFAULT 0 NOT NULL,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`payments\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`booking_id\` integer NOT NULL,
+	\`guest_id\` integer NOT NULL,
+	\`amount\` real NOT NULL,
+	\`type\` text DEFAULT 'installment' NOT NULL,
+	\`status\` text DEFAULT 'pending' NOT NULL,
+	\`due_date\` text NOT NULL,
+	\`paid_date\` text,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`properties\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`owner_id\` integer NOT NULL,
+	\`title\` text NOT NULL,
+	\`description\` text NOT NULL,
+	\`address\` text NOT NULL,
+	\`city\` text NOT NULL,
+	\`bedrooms\` integer DEFAULT 1 NOT NULL,
+	\`bathrooms\` integer DEFAULT 1 NOT NULL,
+	\`max_guests\` integer DEFAULT 2 NOT NULL,
+	\`nightly_rate\` real NOT NULL,
+	\`images\` text DEFAULT '[]' NOT NULL,
+	\`amenities\` text DEFAULT '[]' NOT NULL,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`ratings\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`booking_id\` integer NOT NULL,
+	\`guest_id\` integer NOT NULL,
+	\`property_id\` integer NOT NULL,
+	\`owner_id\` integer NOT NULL,
+	\`overall_score\` integer NOT NULL,
+	\`cleanliness_score\` integer NOT NULL,
+	\`communication_score\` integer NOT NULL,
+	\`value_score\` integer NOT NULL,
+	\`review\` text,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`trip_requests\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`guest_id\` integer NOT NULL,
+	\`city\` text NOT NULL,
+	\`check_in\` text NOT NULL,
+	\`check_out\` text NOT NULL,
+	\`guests\` integer DEFAULT 2 NOT NULL,
+	\`bedrooms_needed\` integer DEFAULT 1 NOT NULL,
+	\`budget_total\` real NOT NULL,
+	\`budget_per_night\` real NOT NULL,
+	\`notes\` text,
+	\`status\` text DEFAULT 'active' NOT NULL,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS \`users\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`name\` text NOT NULL,
+	\`email\` text NOT NULL,
+	\`role\` text DEFAULT 'guest' NOT NULL,
+	\`phone\` text,
+	\`avatar\` text,
+	\`created_at\` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS \`users_email_unique\` ON \`users\` (\`email\`);
+`;
+
+function ensureSchema() {
+  sqlite.exec(SCHEMA_DDL);
+}
+ensureSchema();
+
 // ─── Lightweight startup migrations ───
-// The prototype has no migration runner; tables were created with drizzle-kit push.
 // New columns are added idempotently here so existing data.db files keep working.
 function columnExists(table: string, column: string): boolean {
   const info = sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
